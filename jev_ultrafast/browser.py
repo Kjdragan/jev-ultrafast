@@ -47,47 +47,57 @@ class Browser:
     # model can only choose BLOCKED. Pure quiescence is not enough on its own — a page can be
     # stable for seconds with a timer still pending — so strong busy signals are honoured until
     # they clear, and the whole wait is capped so a page that is busy forever keeps the
-    # immediate observation instead of hanging.
+    # immediate observation instead of hanging. An input that produces nothing observable
+    # (no busy signal, no marker change) keeps the fast path instead of paying the quiet window.
     _BUSY_JS = """(node => {
       const c = window.__jevFast; const el = c && node != null ? c.nodes.get(node) : null;
       const vis = e => { try { const r = e.getBoundingClientRect();
-        return r.width > 0 && r.height > 0 && getComputedStyle(e).display !== 'none'
-          && getComputedStyle(e).visibility !== 'hidden'; } catch (_) { return false; } };
-      if (el && el.disabled) return 'acted-node-disabled';
-      if (document.querySelector('[aria-busy="true"]')) return 'aria-busy';
-      for (const e of document.querySelectorAll('progress,[role="progressbar"]')) if (vis(e)) return 'progressbar';
-      const weak = '[id*="load" i],[class*="load" i],[class*="spinner" i],[class*="busy" i]';
-      for (const e of document.querySelectorAll(weak)) if (vis(e)) return 'loading-indicator';
-      return null;
+        return r.width > 0 && r.height > 0 &&
+          e.checkVisibility({checkOpacity:true,checkVisibilityCSS:true}); } catch (_) { return false; } };
+      let weak = false;
+      const selectors = '[id*="load" i],[class*="load" i],[class*="spinner" i],[class*="busy" i]';
+      for (const e of document.querySelectorAll(selectors)) if (vis(e)) { weak = true; break; }
+      if (el && el.matches(':disabled')) return ['acted-node-disabled', weak];
+      if (document.querySelector('[aria-busy="true"]')) return ['aria-busy', weak];
+      const bars = 'progress,[role="progressbar"]';
+      for (const e of document.querySelectorAll(bars)) if (vis(e)) return ['progressbar', weak];
+      return [null, weak];
     })"""
 
-    # `loading-indicator` is weak — an id/class heuristic — and real pages leave such elements
-    # visible forever (duplicate ids where only the first is hidden, spinners nobody removes).
-    # It is honoured only while the page has not moved since the input, and only when it was not
-    # already showing before it; after the page has moved, a lingering indicator is stale rather
-    # than evidence, and typing legitimately changes nothing for it to wait on.
+    # The weak indicator is an id/class heuristic, reported independently of the strong signals
+    # so a strong signal present before the input cannot mask it. Real pages leave such elements
+    # visible forever (duplicate ids where only the first is hidden, spinners nobody removes),
+    # so it is honoured only while the page has not moved since the input, and only when it was
+    # not already showing before it; after the page has moved, a lingering indicator is stale
+    # rather than evidence.
     _STRONG = {"acted-node-disabled", "aria-busy", "progressbar", "stale"}
 
     def _settle_after_input(self, action, quiet=0.4, cap=8.0):
         node = action.get("node") if isinstance(action.get("node"), int) else None
-        pre = getattr(self, "_busy_before_input", None)
+        pre = getattr(self, "_busy_before_input", None) or (None, False)
         t0 = last_change = time.monotonic()
         marker, changes = None, -1  # first read establishes the baseline, not a change
+        seen = False  # any busy signal or page change since the input
         while True:
             try:
-                busy = self.evaluate(self._BUSY_JS + "(" + json.dumps(node) + ")")
+                busy, weak = self.evaluate(self._BUSY_JS + "(" + json.dumps(node) + ")") or (None, False)
                 m = self.evaluate(MARKER)
             except StalePage:
-                busy, m = "stale", None
+                busy, weak, m = "stale", False, None
             now = time.monotonic()
             if m != marker:
                 marker, last_change, changes = m, now, changes + 1
-            if busy and busy not in self._STRONG and (changes > 0 or busy == pre):
-                busy = None
-            if not busy and now - last_change >= quiet:
-                return {"waited_ms": round((now - t0) * 1000), "capped": False, "changes": changes}
+            seen = seen or busy is not None or changes > 0
+            if not busy and weak and (changes > 0 or pre[1]):
+                weak = False
+            if not (busy or weak):
+                if not seen and now - last_change >= 0.1:
+                    return {"waited_ms": round((now - t0) * 1000), "capped": False, "changes": changes}
+                if now - last_change >= quiet:
+                    return {"waited_ms": round((now - t0) * 1000), "capped": False, "changes": changes}
             if now - t0 >= cap:
-                return {"waited_ms": round((now - t0) * 1000), "capped": True, "still": busy, "changes": changes}
+                still = busy or weak
+                return {"waited_ms": round((now - t0) * 1000), "capped": True, "still": still, "changes": changes}
             time.sleep(0.1)
 
     def observe(self, screenshot=True):

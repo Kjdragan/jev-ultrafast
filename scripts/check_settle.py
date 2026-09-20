@@ -12,25 +12,36 @@ from jev_ultrafast.browser import Browser
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
         mode = parse_qs(urlsplit(self.path).query).get("case", ["delayed"])[0]
-        # The second `id="loading"` div is never hidden: duplicate ids are common on real
-        # pages, and getElementById only ever returns the first, so one indicator lingers
-        # forever after the operation completes.
-        extra = '<div id="loading">Still loading</div>' if mode == "sloppy" else ""
-        restore = "" if mode == "stuck" else (
-            "setTimeout(()=>{b.disabled=false;"
-            "document.getElementById('loading').style.display='none';"
-            "document.getElementById('sentinel').disabled=false;},1500);"
-        )
+        # The second `id="loading"` div carries an inline style so the `#loading` stylesheet
+        # rule cannot hide it: duplicate ids are common on real pages, and getElementById only
+        # ever returns the first, so one indicator lingers forever after the operation ends.
+        # It is visible from load in the `sloppy` and `masked` cases.
+        extra = ('<div id="loading" style="display:block">Still loading</div>'
+                 if mode in {"sloppy", "masked"} else "")
+        busy = '<div id="busywork" aria-busy="true">Working</div>' if mode == "masked" else ""
+        if mode == "masked":
+            # The pre-existing strong signal clears 1.5 s after the click, while the page
+            # marker never changes: the lingering weak indicator must not then be mistaken
+            # for new work and hold the settle to its cap.
+            restore = "setTimeout(()=>document.getElementById('busywork').removeAttribute('aria-busy'),1500);"
+            disable = ""
+        elif mode == "stuck":
+            restore, disable = "", "b.disabled=true;"
+        else:
+            restore = ("setTimeout(()=>{b.disabled=false;"
+                       "document.getElementById('loading').style.display='none';"
+                       "document.getElementById('sentinel').disabled=false;},1500);")
+            disable = "b.disabled=true;"
+        show = "" if mode == "masked" else "document.getElementById('loading').style.display='block';"
         body = (f"<!doctype html><title>Busy fixture</title>"
                 f'<style>body{{margin:40px;font:18px sans-serif}}button{{padding:20px}}'
                 f'#loading{{display:none}}</style>'
-                f'<button id="go">Enable</button>'
+                f'<button id="go">{"Refresh" if mode == "masked" else "Enable"}</button>'
                 f'<label>Sentinel <input id="sentinel" disabled></label>'
-                f'<div id="loading">Loading</div>{extra}'
+                f'{busy}<div id="loading">Loading</div>{extra}'
                 f"<script>document.getElementById('go').onclick=e=>{{"
                 f"window.clicks=(window.clicks||0)+1;window.clickedAt=performance.now();"
-                f"const b=e.currentTarget;b.disabled=true;"
-                f"document.getElementById('loading').style.display='block';{restore}}};</script>").encode()
+                f"const b=e.currentTarget;{disable}{show}{restore}}};</script>").encode()
         self.send_response(200)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
@@ -45,7 +56,7 @@ def check(url, mode):
     browser = Browser(url)
     try:
         page = browser.observe(screenshot=False)
-        action = next(a for a in page["actions"] if a["label"] == "Enable")
+        action = next(a for a in page["actions"] if a["label"] == ("Refresh" if mode == "masked" else "Enable"))
         assert not any(a["label"] == "Sentinel" for a in page["actions"]), "Disabled field must not be offered"
         started = time.monotonic()
         browser.act(action, page)
@@ -57,6 +68,9 @@ def check(url, mode):
             # A page that is busy forever must keep the wait bounded, not hang or skip it.
             assert 8.0 <= elapsed < 9.5, f"Busy-forever wait was not capped as designed: {elapsed:.1f} s"
             assert not any(a["label"] == "Sentinel" for a in current["actions"])
+        elif mode == "masked":
+            # The strong signal clearing is the only event; the settle must release on it.
+            assert 1.5 <= elapsed < 4.0, f"Stale weak indicator held the settle: {elapsed:.1f} s"
         else:
             sentinel = next(a for a in current["actions"] if a["label"] == "Sentinel")
             assert sentinel["kind"] == "fill", "Field enabled by the handler must be offered as fillable"
@@ -67,7 +81,7 @@ def check(url, mode):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    cases = ["delayed", "sloppy", "stuck"]
+    cases = ["delayed", "sloppy", "masked", "stuck"]
     parser.add_argument("--case", choices=cases)
     args = parser.parse_args()
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)

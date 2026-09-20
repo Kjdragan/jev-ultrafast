@@ -97,7 +97,7 @@ uv run --env-file .env python examples/run.py \
 - **No screenshots in the default agent loop.** Jev consumes structured state. The inspector opts into screenshots; the video uses a separate continuous screencast.
 - **One browser call per snapshot.** Read visible controls, their names, values, and text atomically. Keep references to the actual DOM nodes.
 - **Validate the selected target.** Clicks check the document, form values, target, and nearby context. Animation alone does not force another prediction. Resolve current geometry and reject covered controls before input.
-- **Wait for useful state.** After typing into a combobox, wait for visible suggestions, capped at 200 ms. After an input whose control disables itself or shows a busy indicator, wait for the busy state to clear, capped at 8 s. Other interactions get at most two animation frames or 50 ms. These reads happen after execution is logged.
+- **Wait for useful state.** After typing into a combobox, wait for visible suggestions, capped at 200 ms. After any other input, wait for the page to settle: strong busy signals (the acted control disabled, `aria-busy`, a visible progress) are honoured until they clear, then the page marker must hold still for 400 ms, all capped at 8 s; an input that produces nothing observable keeps the fast path. These reads happen after execution is logged.
 - **Keep hidden tabs rendering.** Focus emulation prevents background animation throttling without switching Chrome's visible tab.
 - **Send visible text.** Offscreen article bodies and footers do not fill the model context.
 - **Reuse an interrupted text request.** A generated value survives a stale-page retry only if the entire text-helper input is unchanged.
