@@ -32,6 +32,92 @@ class Browser:
             if self.evaluate("document.readyState") == "complete":
                 break
             time.sleep(0.02)
+        # ---- estate patch (JEV_READY=1), 2026-09-21 ---------------------------------
+        self.ready = {"why": "readystate-complete", "gated": False}
+        if os.environ.get("JEV_READY") == "1":
+            self.ready = self._await_indexer()
+
+    # ---- estate patch (JEV_READY=1), 2026-09-21 -------------------------------------
+    # `readyState == "complete"` says the DOCUMENT finished loading. On a client-rendered page
+    # the route paints AFTER that, so the constructor above hands the indexer a document with
+    # ZERO controls and Jev decides against a blank page. Measured on hPanel (browser_use_lab
+    # findings §15j/§15k): the constructor returned at 15.84 s on its own cap with `readyState`
+    # still `interactive`, 0 controls, 0 body characters, and `wait` the only action offered --
+    # the first indexable control arrived 13.3 s later. It returned 0 controls in all twelve
+    # trials across §15k and §15l, foreground and activated included, which is why this fix is
+    # independent of the focus half and stands after it.
+    #
+    # WHAT IT WAITS FOR, and why it is not "at least one control". That naive predicate was
+    # built first, inside a harness, and paid for: it returned at 10 of ~18 controls on a real
+    # page and Jev answered `done` about a page that was not there yet. A premature `done` is
+    # strictly worse than the defect -- it is a wrong answer where a premature `blocked` is at
+    # least an honest refusal. So the condition is the indexed count REACHING ONE AND THEN
+    # CEASING TO GROW for `quiet` seconds, with a cap so a genuinely empty page still returns.
+    #
+    # WHAT IT POLLS, measured rather than assumed (browser_use_lab findings §6b). Three cheaper
+    # predicates were timed against the real indexer on six pages:
+    #   * `document.body.innerText.length` is non-zero from the first paint on any page with a
+    #     heading -- 16 chars on a fixture with zero controls -- so it cannot gate.
+    #   * a bare `querySelectorAll(<this file's own selector>)` count is ~4x cheaper and tracks
+    #     the indexer exactly on ordinary pages, but settles 444 ms EARLY when elements land in
+    #     the DOM hidden and are revealed later: the same premature return by another route.
+    #   * that count filtered by visibility and `:disabled` fixes the hidden case and still
+    #     fails on a real console -- 116 against the indexer's 33, settling 248 ms early,
+    #     because `snapshot.js` also rejects anything whose centre is outside the viewport.
+    # Only the indexer is the indexer. It costs 8-68 ms per evaluation on the pages measured
+    # (68 ms is a 116-control board), which is bounded, paid once per page load, and cheap
+    # against a gate that is currently returning blank documents.
+    #
+    # QUIET WINDOW, 0.6 s. It has to EXCEED the largest gap between two consecutive changes in
+    # the indexed count, or the gate returns in the silence between two render bursts. Measured
+    # maxima: 240 ms (Mission Control's board), 373 ms (Tome, authenticated), 257 ms (the rig
+    # fixture at default spacing), 423 ms (that fixture with its bursts deliberately spread).
+    # 0.6 s clears the largest real page by 1.6x. The error is asymmetric -- too short is a
+    # wrong answer, too long is a bounded cost on every page -- so it is set generously.
+    #
+    # CAP, 20 s, and it binds ONLY while the count is still zero. It is longer than the
+    # `readyState` wait above so the gate genuinely extends the window, and it covers the
+    # activated hPanel range of 7.1-14.5 s. It deliberately does NOT cover that page's
+    # UNACTIVATED background target, whose first control arrived at 29.15 s: that is fix (2)'s
+    # territory, and a page which never paints reports `capped` rather than pretending.
+    _READY_JS = ("(() => { const s=" + READ_STATE + "; if (!s) return null;"
+                 " const a=(s.actions||[]).filter(x => x.kind!=='scroll' && x.kind!=='wait');"
+                 " return {n: new Set(a.map(x => x.node)).size,"
+                 " chars: document.body ? document.body.innerText.length : 0}; })()")
+
+    def _await_indexer(self, quiet=0.6, cap=20.0, poll=0.1):
+        """Return once the indexed control count has reached one and stopped growing.
+
+        The return value is the instrument, not logging: `why` separates a page that was
+        already fine (`readystate-complete`) from one this gate rescued (`indexer-satisfied`)
+        from one that never painted (`capped`). Without it a fixed page and a page that never
+        needed fixing are indistinguishable afterwards.
+        """
+        t0 = last_change = time.monotonic()
+        n, chars, polls, peak = 0, 0, 0, 0
+        while True:
+            try:
+                state = self.evaluate(self._READY_JS) or {}
+            except StalePage:
+                # A navigation landed mid-evaluation. That is a change, not an error.
+                state, last_change = {}, time.monotonic()
+            polls += 1
+            got = int(state.get("n") or 0)
+            chars = int(state.get("chars") or 0)
+            now = time.monotonic()
+            if got != n:
+                n, last_change = got, now
+                peak = max(peak, got)
+            if n >= 1 and now - last_change >= quiet:
+                why = "indexer-satisfied"
+            elif now - t0 >= cap:
+                why = "capped"
+            else:
+                time.sleep(poll)
+                continue
+            return {"why": why, "gated": True, "elements_n": n, "peak_elements_n": peak,
+                    "chars": chars, "waited_ms": round((now - t0) * 1000), "polls": polls,
+                    "quiet_s": quiet, "cap_s": cap}
 
     def call(self, method, **params):
         return cdp(method, session_id=self.session, **params)
