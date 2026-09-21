@@ -56,9 +56,27 @@
   for (const e of document.querySelectorAll(selector)) {
     if (!safe(e) || !visible(e) || e.matches(':disabled') || e.closest('[aria-disabled="true"]')) continue;
     const r=e.getBoundingClientRect(), x=r.x+r.width/2, y=r.y+r.height/2, rname=role(e);
-    if (!rname || r.width<=0 || r.height<=0 || x<0 || y<0 || x>=innerWidth || y>=innerHeight) continue;
+    if (!rname || r.width<=0 || r.height<=0) continue;
+    // ---- estate patch (JEV_VIEWPORT), 2026-09-21 -------------------------------------
+    // Stock drops every control whose CENTRE is outside the viewport, which on a real
+    // console is about half of them (83 of 116 on one board). `__JEV_VIEWPORT_MODE__` is
+    // substituted by browser.py from the env at import; empty means stock, so an unset
+    // checkout indexes exactly what it always did. `offscreen` rides on the action either
+    // way, because a caller has to be able to tell a control it can reach from one it
+    // cannot -- the ACT GUARD applies this same test again, so indexing alone changes
+    // nothing on its own.
+    // The mode is an ALLOW-LIST, so an UNSUBSTITUTED file is stock. This file is read
+    // straight off disk by five instruments here (`jev_batch`, `jev_sweep`'s presettle,
+    // `jev_snapshot`, `jev_blindspots`, `jev_extractor_delta`) which never run browser.py's
+    // substitution -- and the first version tested `=== ""`, so for them the sentinel was
+    // "not empty" and every one silently began indexing offscreen controls. Measured
+    // immediately: `rig/prerendered.html` went from 27 controls to 60 with the mode unset.
+    const __vp = "__JEV_VIEWPORT_MODE__";
+    const __offscreen = x<0 || y<0 || x>=innerWidth || y>=innerHeight;
+    if (__offscreen && !(__vp === "index" || __vp === "scroll")) continue;
+    // ---- end estate patch --------------------------------------------------------------
     if (rname==='gridcell' && e.querySelector('button,[role="button"]')) continue;
-    const base={node:identity(e),role:rname,label:name(e)||rname,
+    const base={node:identity(e),role:rname,label:name(e)||rname,offscreen:__offscreen,
       rect:{x:r.x,y:r.y,w:r.width,h:r.height}};
     for (const key of ['checked','selected','expanded']) {
       const value=e.getAttribute('aria-'+key);

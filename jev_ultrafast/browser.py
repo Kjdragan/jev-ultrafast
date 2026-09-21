@@ -11,7 +11,21 @@ from browser_harness.admin import ensure_daemon
 from browser_harness.helpers import cdp
 
 # Atomically read visible content and controls, preserving actual DOM node identity.
-READ_STATE = Path(__file__).with_name("snapshot.js").read_text()
+# ---- estate patch (JEV_VIEWPORT), 2026-09-21 -------------------------------------------
+# `snapshot.js` runs IN THE PAGE and cannot read the environment, so the mode is substituted
+# into its source once, here, at import. Unset -> the empty string -> the file behaves exactly
+# as shipped. Two values:
+#   index  -- the indexer offers controls whose centre is outside the viewport.
+#   scroll -- index, AND the act guard scrolls a target into view before resolving its point.
+# `index` alone is deliberately reachable: the viewport test exists TWICE (here and in the act
+# guard below), so offering a control the guard will refuse is a measurable state rather than
+# an argument, and the arm that proves it is worth being able to run.
+JEV_VIEWPORT = os.environ.get("JEV_VIEWPORT", "")
+if JEV_VIEWPORT not in ("", "index", "scroll"):
+    raise ValueError(f"JEV_VIEWPORT must be '', 'index' or 'scroll'; got {JEV_VIEWPORT!r}")
+READ_STATE = (Path(__file__).with_name("snapshot.js").read_text()
+              .replace("__JEV_VIEWPORT_MODE__", JEV_VIEWPORT))
+# ---- end estate patch ------------------------------------------------------------------
 MARKER = f"(() => {{ const state={READ_STATE}; return state?.marker ?? null; }})()"
 
 class StalePage(ValueError):
@@ -302,13 +316,31 @@ def browser_operation(request):
             if type(action["node"]) is not int:
                 raise ValueError("Invalid observed node")
             # Code-owned node IDs refer to actual observed elements, never model-generated selectors.
-            target = evaluate("""(action => {
+            # The mode is an ARGUMENT, not a top-level `const`. Every act in a run evaluates
+            # this same source in the same context, and a top-level `const`/`let` persists in
+            # the global lexical environment -- so a declaration here throws "already been
+            # declared" on the SECOND action of every run and nowhere in a single-step test.
+            target = evaluate("""((action, VIEWPORT_MODE) => {
               const e=window.__jevFast?.nodes.get(action.node);
               if (!e?.isConnected || e.matches(':disabled') || e.closest('[aria-disabled="true"],[inert]') ||
                   !e.checkVisibility({checkOpacity:true,checkVisibilityCSS:true})) return null;
               if (action.kind==='fill' && (e.readOnly || e.getAttribute('aria-readonly')==='true')) return null;
-              const r=e.getBoundingClientRect(), x=r.x+r.width/2, y=r.y+r.height/2;
-              if (!r.width || !r.height || x<0 || y<0 || x>=innerWidth || y>=innerHeight) return null;
+              let r=e.getBoundingClientRect(), x=r.x+r.width/2, y=r.y+r.height/2;
+              if (!r.width || !r.height) return null;
+              // ---- estate patch (JEV_VIEWPORT=scroll), 2026-09-21 ----------------------
+              // The viewport test lives HERE as well as in the indexer, and this is the copy
+              // that decides whether an action can be dispatched -- CDP mouse events carry
+              // viewport coordinates, so a control below the fold has no point to click.
+              // `scroll` brings it into view first, instantly rather than smoothly, because
+              // the dispatch that follows is synchronous. Everything after this line is
+              // unchanged, including the hit test: a control that is covered once scrolled
+              // to is still refused.
+              if ((x<0 || y<0 || x>=innerWidth || y>=innerHeight) && VIEWPORT_MODE==='scroll') {
+                e.scrollIntoView({block:'center', inline:'center', behavior:'instant'});
+                r=e.getBoundingClientRect(); x=r.x+r.width/2; y=r.y+r.height/2;
+              }
+              // ---- end estate patch ------------------------------------------------------
+              if (x<0 || y<0 || x>=innerWidth || y>=innerHeight) return null;
               if (!e.contains(document.elementFromPoint(x,y))) return null;
               if (action.kind==='select') {
                 if (e.tagName!=='SELECT' || ![...e.options].some(o=>o.value===action.value &&
@@ -318,7 +350,7 @@ def browser_operation(request):
                 e.dispatchEvent(new Event('change',{bubbles:true}));
               }
               return {x,y};
-            })(""" + json.dumps(action) + ")")
+            })(""" + json.dumps(action) + "," + json.dumps(JEV_VIEWPORT) + ")")
             if target is None:
                 if kind == "select":
                     raise RuntimeError("Dropdown execution was not confirmed; inspect before retrying.")
