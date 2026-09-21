@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -41,9 +42,76 @@ class Browser:
             raise StalePage("Document changed during evaluation")
         return response.get("result", {}).get("value")
 
+    # ---- estate patch (JEV_SETTLE=1), 2026-09-19 -------------------------------------
+    # Stock Jev re-observes ~50 ms after an input and treats the page as current. On a page
+    # whose handler runs a 3000 ms timer (the-internet's dynamic_controls, measured), that
+    # snapshot shows the clicked button DISABLED and a loading indicator VISIBLE, the target
+    # of the next step not yet actionable, and Jev chooses BLOCKED at ~4 s — before the
+    # page has finished doing what Jev correctly asked it to do. WAIT cannot rescue it: one
+    # WAIT sleeps 100 ms, so a 3 s handler is ~30 round trips.
+    #
+    # This waits, after an input, until the page stops LOOKING busy and then stops CHANGING:
+    #   busy   = the acted-on node is now disabled, or aria-busy / a progressbar is set, or
+    #            a visible element whose id/class says load/spinner/busy;
+    #   settled = the page marker unchanged for `quiet` seconds.
+    # Capped at `cap` seconds, then proceeds regardless — so a page that is busy forever
+    # degrades to today's behaviour rather than hanging. Pure quiescence is NOT enough on its
+    # own: this page is stable for three seconds with a timer pending, and a quiet-window
+    # check returns at 0.4 s and misses the change. The busy signals are what carry it.
+    _BUSY_JS = """(node => {
+      const c = window.__jevFast; const el = c && node != null ? c.nodes.get(node) : null;
+      const vis = e => { try { const r = e.getBoundingClientRect();
+        return r.width > 0 && r.height > 0 && getComputedStyle(e).display !== 'none'
+          && getComputedStyle(e).visibility !== 'hidden'; } catch (_) { return false; } };
+      if (el && el.disabled) return 'acted-node-disabled';
+      if (document.querySelector('[aria-busy="true"]')) return 'aria-busy';
+      for (const e of document.querySelectorAll('progress,[role="progressbar"]')) if (vis(e)) return 'progressbar';
+      for (const e of document.querySelectorAll('[id*="load" i],[class*="load" i],[class*="spinner" i],[class*="busy" i]'))
+        if (vis(e)) return 'loading-indicator';
+      return null;
+    })"""
+
+    # Signals in the first set are STRONG: the page itself says it is mid-operation, and they
+    # are honoured until they clear. `loading-indicator` is WEAK — an id/class heuristic —
+    # and real pages leave such things visible forever (the-internet's dynamic_controls
+    # gives two divs the same `id="loading"` and jQuery hides only the first). So it is
+    # honoured only until the page has demonstrably moved once since the input; after that
+    # a lingering indicator is stale, and trusting it burned the full cap twice per run.
+    _STRONG = {"acted-node-disabled", "aria-busy", "progressbar", "stale"}
+
+    def _settle_after_input(self, action, quiet=0.4, cap=8.0):
+        node = action.get("node") if isinstance(action.get("node"), int) else None
+        pre = getattr(self, "_busy_before_input", None)
+        t0 = last_change = time.monotonic()
+        marker, changes = None, -1  # first read establishes the baseline, not a change
+        while True:
+            try:
+                busy = self.evaluate(self._BUSY_JS + "(" + json.dumps(node) + ")")
+                m = self.evaluate(MARKER)
+            except StalePage:
+                busy, m = "stale", None
+            now = time.monotonic()
+            if m != marker:
+                marker, last_change, changes = m, now, changes + 1
+            if busy and busy not in self._STRONG and (changes > 0 or busy == pre):
+                # Weak indicator that was ALREADY showing before this input, or that lingers
+                # after the page has moved once: not evidence about this action. Typing, for
+                # instance, legitimately changes nothing, so "wait until it moves" would hold
+                # a stale indicator for the whole cap.
+                busy = None
+            if not busy and now - last_change >= quiet:
+                return {"waited_ms": round((now - t0) * 1000), "capped": False,
+                        "changes": changes}
+            if now - t0 >= cap:
+                return {"waited_ms": round((now - t0) * 1000), "capped": True,
+                        "still": busy, "changes": changes}
+            time.sleep(0.1)
+
     def observe(self, screenshot=True):
         if getattr(self, "after_input", None):
             action, self.after_input = self.after_input, None
+            if os.environ.get("JEV_SETTLE") == "1" and action.get("kind") != "wait":
+                self.last_settle = self._settle_after_input(action)
             # This is read-only and happens after execution was logged, even if navigation interrupts it.
             try:
                 self.call(
@@ -102,6 +170,13 @@ class Browser:
             raise StalePage("Page changed since this decision. Observe again.")
         if action["kind"] == "wait":
             time.sleep(0.1)
+        if os.environ.get("JEV_SETTLE") == "1" and action["kind"] != "wait":
+            # Baseline for the settle: what already looked busy BEFORE this input.
+            node = action.get("node") if isinstance(action.get("node"), int) else None
+            try:
+                self._busy_before_input = self.evaluate(self._BUSY_JS + "(" + json.dumps(node) + ")")
+            except StalePage:
+                self._busy_before_input = None
         result = browser_operation({"operation": "act", "session": self.session, "action": action, "text": text})
         self.after_input = action if action["kind"] != "wait" else None
         return result
