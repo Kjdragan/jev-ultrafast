@@ -31,13 +31,36 @@ def validate_choice(answer, ids):
     try:
         probabilities = answer["probabilities"]
         numbers = [*probabilities.values(), answer["confidence"]]
-        valid = (
+        well_formed = (
             answer["choice"] in ids
             and set(probabilities) == set(ids)
             and all(type(n) in (int, float) and math.isfinite(n) and 0 <= n <= 1 for n in numbers)
             and abs(sum(probabilities.values()) - 1) < 0.02
-            and probabilities[answer["choice"]] >= max(probabilities.values()) - 1e-6
         )
+        is_argmax = well_formed and probabilities[answer["choice"]] >= max(probabilities.values()) - 1e-6
+        valid = well_formed and is_argmax
+        # ---- estate patch (JEV_ACCEPT_SAMPLED=1), 2026-09-21 -------------------------
+        # A SAMPLED choice need not be the argmax, and requiring it is a wrong-field check:
+        # the API returns a choice plus a distribution, and nothing in its contract promises
+        # they agree. Measured on a near-tied goal: choice CLICK at 0.40 against BLOCKED at
+        # 0.41, confidence 0.26, probabilities summing to 1 over exactly the offered ids --
+        # a well-formed response that ends the run with "Invalid TypeSafe response", which
+        # sends the reader hunting for a vendor fault that is not there. Rate ~1-2% on a
+        # near-tied goal, 0 of 513 on stable ones, so it fires precisely where the decision
+        # is hardest. Unset, this file behaves exactly as shipped.
+        #
+        # It RECORDS rather than silently accepting: the marker rides on the answer dict,
+        # which `choose()` returns as `raw_answers`, so a caller can stamp the row and the
+        # frequency stays measurable instead of becoming the next invisible path.
+        if well_formed and not is_argmax and os.environ.get("JEV_ACCEPT_SAMPLED") == "1":
+            top = max(probabilities, key=probabilities.get)
+            answer["choice_not_argmax"] = {
+                "choice": answer["choice"], "argmax": top,
+                "p_choice": probabilities[answer["choice"]], "p_argmax": probabilities[top],
+                "confidence": answer["confidence"],
+            }
+            valid = True
+        # ---- end estate patch ---------------------------------------------------------
     except (KeyError, TypeError, ValueError):
         valid = False
     if not valid:
