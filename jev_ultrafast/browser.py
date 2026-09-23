@@ -26,6 +26,17 @@ if JEV_VIEWPORT not in ("", "index", "scroll"):
 READ_STATE = (Path(__file__).with_name("snapshot.js").read_text()
               .replace("__JEV_VIEWPORT_MODE__", JEV_VIEWPORT))
 # ---- end estate patch ------------------------------------------------------------------
+# ---- estate patch (JEV_LISTENERS=1), 2026-09-23 ----------------------------------------
+# Index controls whose only clickability is a script-attached listener (snapshot.js has the
+# rule and the reason). "1" or unset; the sentinel is substituted here like the viewport's,
+# and the substitution is asserted, because one that matches nothing measures stock twice.
+JEV_LISTENERS = os.environ.get("JEV_LISTENERS", "")
+if JEV_LISTENERS not in ("", "1"):
+    raise ValueError(f"JEV_LISTENERS must be '' or '1'; got {JEV_LISTENERS!r}")
+if "__JEV_LISTENERS_MODE__" not in READ_STATE:
+    raise RuntimeError("snapshot.js carries no __JEV_LISTENERS_MODE__ sentinel")
+READ_STATE = READ_STATE.replace("__JEV_LISTENERS_MODE__", JEV_LISTENERS)
+# ---- end estate patch ------------------------------------------------------------------
 MARKER = f"(() => {{ const state={READ_STATE}; return state?.marker ?? null; }})()"
 
 class StalePage(ValueError):
@@ -378,7 +389,17 @@ def browser_operation(request):
                     call("Input.insertText", text=request["text"])
         return {"executed": action["id"]}
 
-    info = evaluate(READ_STATE)
+    if JEV_LISTENERS == "1":
+        # ---- estate patch (JEV_LISTENERS=1): the observe read, and only it, gets the
+        # DevTools command-line API, so `getEventListeners` exists for snapshot.js. Every
+        # other read of READ_STATE reuses the set this one found.
+        result = call("Runtime.evaluate", expression=READ_STATE, returnByValue=True,
+                      includeCommandLineAPI=True)
+        if result.get("exceptionDetails"):
+            raise StalePage("Document changed during evaluation")
+        info = result.get("result", {}).get("value")
+    else:
+        info = evaluate(READ_STATE)
     if info is None:
         raise StalePage("Document is navigating")
     info["fingerprint"] = fingerprint(info)

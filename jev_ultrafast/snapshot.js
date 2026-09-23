@@ -52,10 +52,58 @@
       e.getAttribute('aria-expanded'),e.getAttribute('aria-checked'),e.getAttribute('aria-selected'),
       e.getAttribute('href'),scope?.innerText?.slice(0,6000)||''];
   };
+  // ---- estate patch (JEV_LISTENERS=1), 2026-09-23 --------------------------------------
+  // A control whose ONLY clickability is a listener attached by script leaves no trace in
+  // the DOM: jQuery tablesorter binds `.click()` on a bare `<th class="header">`, and the
+  // selector above never matches it (the-internet /tables, measured: Jev blocked at 0
+  // actions every trial). The one instrument that sees such a listener is the inspector's,
+  // so browser.py evaluates this file with `includeCommandLineAPI` on the observe path and
+  // the DevTools `getEventListeners(el)` is in scope here -- the same backend as CDP
+  // `DOMDebugger.getEventListeners`, in one round trip instead of one per node.
+  // Every OTHER evaluation of this file (the freshness marker, the readiness gate, and the
+  // instruments that read it off disk) runs without that API, so it reuses the set the last
+  // observe found; a set that changed between two reads of one page would make every
+  // decision stale. The mode is an ALLOW-LIST like the viewport's: unsubstituted is stock.
+  // What is offered: a visible, labelled element outside every indexed control, with a
+  // click/mouse/pointer listener ON ITSELF, not larger than a quarter of the viewport, and
+  // containing no indexed control (a card or row whose link is already offered is a
+  // wrapper, not a second control). When a hit contains another hit, the inner one stays.
+  // Delegated listeners (React's root, jQuery `.on(sel, fn)`) sit on an ancestor and are
+  // NOT seen -- this reads where a listener is attached, not what it handles.
+  const __ls = "__JEV_LISTENERS_MODE__", __lvp = "__JEV_VIEWPORT_MODE__";
+  let listened = __ls === "1" ? (cache.listen || []) : [];
+  if (__ls === "1" && typeof getEventListeners === 'function') {
+    const kinds=['click','mousedown','mouseup','pointerdown','pointerup'], found=[];
+    const quarter=innerWidth*innerHeight/4;
+    for (const e of document.body.querySelectorAll('*')) {
+      if (found.length>=60) break;
+      if (['SCRIPT','STYLE','NOSCRIPT','TEMPLATE','IFRAME','BR'].includes(e.tagName) ||
+          (e instanceof SVGElement && e.tagName.toLowerCase()!=='svg')) continue;
+      const r=e.getBoundingClientRect();
+      if (r.width<=0 || r.height<=0 || r.width*r.height>quarter) continue;
+      const cx=r.x+r.width/2, cy=r.y+r.height/2;
+      if ((cx<0 || cy<0 || cx>=innerWidth || cy>=innerHeight) &&
+          !(__lvp === "index" || __lvp === "scroll")) continue;
+      const l=getEventListeners(e);
+      if (!kinds.some(k=>l[k] && l[k].length)) continue;
+      if (e.closest(selector) || e.querySelector(selector) || !visible(e) || !name(e)) continue;
+      found.push(e);
+    }
+    listened=cache.listen=found.filter(e=>!found.some(o=>o!==e && e.contains(o)));
+  }
+  listened=listened.filter(e=>e.isConnected);
+  const __listenedSet=new Set(listened);
+  const candidates=[...document.querySelectorAll(selector)];
+  if (listened.length) {
+    candidates.push(...listened);
+    candidates.sort((a,b)=>a===b ? 0 : a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1);
+  }
+  // ---- end estate patch --------------------------------------------------------------
   const actions=[];
-  for (const e of document.querySelectorAll(selector)) {
+  for (const e of candidates) {
     if (!safe(e) || !visible(e) || e.matches(':disabled') || e.closest('[aria-disabled="true"]')) continue;
-    const r=e.getBoundingClientRect(), x=r.x+r.width/2, y=r.y+r.height/2, rname=role(e);
+    const r=e.getBoundingClientRect(), x=r.x+r.width/2, y=r.y+r.height/2,
+      rname=role(e) || (__listenedSet.has(e) ? 'button' : null);
     if (!rname || r.width<=0 || r.height<=0) continue;
     // ---- estate patch (JEV_VIEWPORT), 2026-09-21 -------------------------------------
     // Stock drops every control whose CENTRE is outside the viewport, which on a real
@@ -78,6 +126,7 @@
     if (rname==='gridcell' && e.querySelector('button,[role="button"]')) continue;
     const base={node:identity(e),role:rname,label:name(e)||rname,offscreen:__offscreen,
       rect:{x:r.x,y:r.y,w:r.width,h:r.height}};
+    if (__listenedSet.has(e)) base.listener=true;  // estate patch (JEV_LISTENERS): records only
     for (const key of ['checked','selected','expanded']) {
       const value=e.getAttribute('aria-'+key);
       if (value!==null) base[key]=value;
