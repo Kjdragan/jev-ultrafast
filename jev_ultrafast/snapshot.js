@@ -123,6 +123,26 @@
     const __offscreen = x<0 || y<0 || x>=innerWidth || y>=innerHeight;
     if (__offscreen && !(__vp === "index" || __vp === "scroll")) continue;
     // ---- end estate patch --------------------------------------------------------------
+    // ---- estate patch (JEV_HITTEST=1), 2026-09-23 --------------------------------------
+    // Offer an in-viewport control only if the act guard in browser.py would accept it:
+    // the same test, `e.contains(document.elementFromPoint(centre))`. Without it the
+    // indexer offers what the guard then refuses ("Target changed or is covered"), and Jev,
+    // choosing correctly, picks it again after every re-observe. Measured on
+    // platform.claude.com /docs/en/models/overview: a sidebar "Pricing" link whose centre is
+    // in the viewport but clipped by the sidebar's scroll container, chosen 118 times in a
+    // row until the 120-call budget. Also dropped, measured on 25 pages: controls under a
+    // consent iframe (BBC, all 33), cookie banners, and nav overflow laid out behind content
+    // (Amazon), none of which a person can see or the guard would click. An offscreen control (viewport mode) is not tested
+    // here: `scroll` brings it into view before the guard resolves its point. Allow-list
+    // mode like the others: unsubstituted is stock.
+    // A link that wraps onto two lines has its box centre on the text between its
+    // fragments, so the centre fails; the centre of a visible fragment is tried next, and
+    // browser.py's act guard uses the same fallback, so what is offered is what can be hit.
+    if (!__offscreen && "__JEV_HITTEST_MODE__" === "1" && !e.contains(document.elementFromPoint(x,y)) &&
+        ![...e.getClientRects()].some(q => { const fx=q.x+q.width/2, fy=q.y+q.height/2;
+          return q.width>0 && q.height>0 && fx>=0 && fy>=0 && fx<innerWidth && fy<innerHeight &&
+            e.contains(document.elementFromPoint(fx,fy)); })) continue;
+    // ---- end estate patch --------------------------------------------------------------
     if (rname==='gridcell' && e.querySelector('button,[role="button"]')) continue;
     const base={node:identity(e),role:rname,label:name(e)||rname,offscreen:__offscreen,
       rect:{x:r.x,y:r.y,w:r.width,h:r.height}};

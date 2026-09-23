@@ -37,6 +37,15 @@ if "__JEV_LISTENERS_MODE__" not in READ_STATE:
     raise RuntimeError("snapshot.js carries no __JEV_LISTENERS_MODE__ sentinel")
 READ_STATE = READ_STATE.replace("__JEV_LISTENERS_MODE__", JEV_LISTENERS)
 # ---- end estate patch ------------------------------------------------------------------
+# ---- estate patch (JEV_HITTEST=1), 2026-09-23 ------------------------------------------
+# Offer only controls the act guard below would accept (snapshot.js has the reason).
+JEV_HITTEST = os.environ.get("JEV_HITTEST", "")
+if JEV_HITTEST not in ("", "1"):
+    raise ValueError(f"JEV_HITTEST must be '' or '1'; got {JEV_HITTEST!r}")
+if "__JEV_HITTEST_MODE__" not in READ_STATE:
+    raise RuntimeError("snapshot.js carries no __JEV_HITTEST_MODE__ sentinel")
+READ_STATE = READ_STATE.replace("__JEV_HITTEST_MODE__", JEV_HITTEST)
+# ---- end estate patch ------------------------------------------------------------------
 MARKER = f"(() => {{ const state={READ_STATE}; return state?.marker ?? null; }})()"
 
 class StalePage(ValueError):
@@ -331,7 +340,7 @@ def browser_operation(request):
             # this same source in the same context, and a top-level `const`/`let` persists in
             # the global lexical environment -- so a declaration here throws "already been
             # declared" on the SECOND action of every run and nowhere in a single-step test.
-            target = evaluate("""((action, VIEWPORT_MODE) => {
+            target = evaluate("""((action, VIEWPORT_MODE, HITTEST_MODE) => {
               const e=window.__jevFast?.nodes.get(action.node);
               if (!e?.isConnected || e.matches(':disabled') || e.closest('[aria-disabled="true"],[inert]') ||
                   !e.checkVisibility({checkOpacity:true,checkVisibilityCSS:true})) return null;
@@ -352,7 +361,17 @@ def browser_operation(request):
               }
               // ---- end estate patch ------------------------------------------------------
               if (x<0 || y<0 || x>=innerWidth || y>=innerHeight) return null;
-              if (!e.contains(document.elementFromPoint(x,y))) return null;
+              if (!e.contains(document.elementFromPoint(x,y))) {
+                // ---- estate patch (JEV_HITTEST=1): a wrapped link's box centre sits on the
+                // text between its fragments; click the centre of a visible fragment instead,
+                // the same fallback the indexer uses to decide what to offer.
+                if (HITTEST_MODE!=='1') return null;
+                const f=[...e.getClientRects()].map(q=>[q.x+q.width/2,q.y+q.height/2,q.width,q.height])
+                  .find(([fx,fy,w,h])=>w>0 && h>0 && fx>=0 && fy>=0 && fx<innerWidth && fy<innerHeight &&
+                    e.contains(document.elementFromPoint(fx,fy)));
+                if (!f) return null;
+                x=f[0]; y=f[1];
+              }
               if (action.kind==='select') {
                 if (e.tagName!=='SELECT' || ![...e.options].some(o=>o.value===action.value &&
                     !o.disabled && !o.closest('optgroup[disabled]'))) return null;
@@ -361,7 +380,7 @@ def browser_operation(request):
                 e.dispatchEvent(new Event('change',{bubbles:true}));
               }
               return {x,y};
-            })(""" + json.dumps(action) + "," + json.dumps(JEV_VIEWPORT) + ")")
+            })(""" + json.dumps(action) + "," + json.dumps(JEV_VIEWPORT) + "," + json.dumps(JEV_HITTEST) + ")")
             if target is None:
                 if kind == "select":
                     raise RuntimeError("Dropdown execution was not confirmed; inspect before retrying.")
