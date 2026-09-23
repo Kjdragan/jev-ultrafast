@@ -138,15 +138,21 @@
     // A link that wraps onto two lines has its box centre on the text between its
     // fragments, so the centre fails; the centre of a visible fragment is tried next, and
     // browser.py's act guard uses the same fallback, so what is offered is what can be hit.
-    if (!__offscreen && "__JEV_HITTEST_MODE__" === "1" && !e.contains(document.elementFromPoint(x,y)) &&
+    // A covered control is flagged here and dropped from the offer AFTER the marker is built
+    // (below): occlusion is geometry, and the marker compares meaning and identity only.
+    // Dropping it here let a control that became covered after an observation make the page
+    // read as changed -- the vendor's own check_guards.py failed its moving-target check
+    // (2026-09-23, fixed the same day; upstream PR #137 carries the same shape).
+    const __covered = !__offscreen && "__JEV_HITTEST_MODE__" === "1" && !e.contains(document.elementFromPoint(x,y)) &&
         ![...e.getClientRects()].some(q => { const fx=q.x+q.width/2, fy=q.y+q.height/2;
           return q.width>0 && q.height>0 && fx>=0 && fy>=0 && fx<innerWidth && fy<innerHeight &&
-            e.contains(document.elementFromPoint(fx,fy)); })) continue;
+            e.contains(document.elementFromPoint(fx,fy)); });
     // ---- end estate patch --------------------------------------------------------------
     if (rname==='gridcell' && e.querySelector('button,[role="button"]')) continue;
     const base={node:identity(e),role:rname,label:name(e)||rname,offscreen:__offscreen,
       rect:{x:r.x,y:r.y,w:r.width,h:r.height}};
     if (__listenedSet.has(e)) base.listener=true;  // estate patch (JEV_LISTENERS): records only
+    if (__covered) base.covered=true;  // estate patch (JEV_HITTEST): dropped after the marker
     for (const key of ['checked','selected','expanded']) {
       const value=e.getAttribute('aria-'+key);
       if (value!==null) base[key]=value;
@@ -177,10 +183,11 @@
     }
   }
   const text=words.join('\n').slice(0,6000), height=document.documentElement.scrollHeight;
+  // Compare meaning and identity. Geometry is always resolved and hit-tested just before input.
+  const semantics=actions.map(({rect,covered,...action})=>action);
+  actions.splice(0,actions.length,...actions.filter(a=>!a.covered));  // estate patch (JEV_HITTEST)
   const page_key=cache.pageKey(), guards={};
   for (const a of actions) if (!(a.node in guards)) guards[a.node]=cache.guard(cache.nodes.get(a.node));
-  // Compare meaning and identity. Geometry is always resolved and hit-tested just before input.
-  const semantics=actions.map(({rect,...action})=>action);
   const marker=[performance.timeOrigin,location.href,scrollX,scrollY,innerWidth,innerHeight,
     document.title,text,semantics,page_key[6]];
   const omitted_actions=Math.max(0,actions.length-250);
