@@ -46,6 +46,16 @@ if "__JEV_HITTEST_MODE__" not in READ_STATE:
     raise RuntimeError("snapshot.js carries no __JEV_HITTEST_MODE__ sentinel")
 READ_STATE = READ_STATE.replace("__JEV_HITTEST_MODE__", JEV_HITTEST)
 # ---- end estate patch ------------------------------------------------------------------
+# ---- estate patch (JEV_LABELS=1), 2026-09-23 -------------------------------------------
+# Offer a checkbox/radio hidden only by opacity when its own label is visible, and click the
+# input or, failing that, the label (snapshot.js has the rule and the measurement).
+JEV_LABELS = os.environ.get("JEV_LABELS", "")
+if JEV_LABELS not in ("", "1"):
+    raise ValueError(f"JEV_LABELS must be '' or '1'; got {JEV_LABELS!r}")
+if "__JEV_LABELS_MODE__" not in READ_STATE:
+    raise RuntimeError("snapshot.js carries no __JEV_LABELS_MODE__ sentinel")
+READ_STATE = READ_STATE.replace("__JEV_LABELS_MODE__", JEV_LABELS)
+# ---- end estate patch ------------------------------------------------------------------
 MARKER = f"(() => {{ const state={READ_STATE}; return state?.marker ?? null; }})()"
 
 class StalePage(ValueError):
@@ -340,10 +350,16 @@ def browser_operation(request):
             # this same source in the same context, and a top-level `const`/`let` persists in
             # the global lexical environment -- so a declaration here throws "already been
             # declared" on the SECOND action of every run and nowhere in a single-step test.
-            target = evaluate("""((action, VIEWPORT_MODE, HITTEST_MODE) => {
+            target = evaluate("""((action, VIEWPORT_MODE, HITTEST_MODE, LABELS_MODE) => {
               const e=window.__jevFast?.nodes.get(action.node);
-              if (!e?.isConnected || e.matches(':disabled') || e.closest('[aria-disabled="true"],[inert]') ||
-                  !e.checkVisibility({checkOpacity:true,checkVisibilityCSS:true})) return null;
+              if (!e?.isConnected || e.matches(':disabled') || e.closest('[aria-disabled="true"],[inert]')) return null;
+              // ---- estate patch (JEV_LABELS=1): a checkbox/radio hidden only by opacity is
+              // acted on through its own visible labels, the same rule the snapshot offers by.
+              const seen=el=>el.checkVisibility({checkOpacity:true,checkVisibilityCSS:true});
+              const labels=LABELS_MODE==='1' && e.tagName==='INPUT' && ['checkbox','radio'].includes(e.type) &&
+                e.checkVisibility({checkVisibilityCSS:true}) ? [...(e.labels||[])].filter(seen) : [];
+              if (!seen(e) && !labels.length) return null;
+              // ---- end estate patch ------------------------------------------------------
               if (action.kind==='fill' && (e.readOnly || e.getAttribute('aria-readonly')==='true')) return null;
               let r=e.getBoundingClientRect(), x=r.x+r.width/2, y=r.y+r.height/2;
               if (!r.width || !r.height) return null;
@@ -365,10 +381,13 @@ def browser_operation(request):
                 // ---- estate patch (JEV_HITTEST=1): a wrapped link's box centre sits on the
                 // text between its fragments; click the centre of a visible fragment instead,
                 // the same fallback the indexer uses to decide what to offer.
-                if (HITTEST_MODE!=='1') return null;
-                const f=[...e.getClientRects()].map(q=>[q.x+q.width/2,q.y+q.height/2,q.width,q.height])
-                  .find(([fx,fy,w,h])=>w>0 && h>0 && fx>=0 && fy>=0 && fx<innerWidth && fy<innerHeight &&
-                    e.contains(document.elementFromPoint(fx,fy)));
+                // (JEV_LABELS=1): then the centre or a fragment of one of its visible labels,
+                // since clicking a label activates its control.
+                const pts=el=>[el.getBoundingClientRect(),...el.getClientRects()]
+                  .map(q=>[q.x+q.width/2,q.y+q.height/2,q.width,q.height,el])
+                  .filter(([fx,fy,w,h])=>w>0 && h>0 && fx>=0 && fy>=0 && fx<innerWidth && fy<innerHeight);
+                const f=[...(HITTEST_MODE==='1' ? pts(e) : []), ...labels.flatMap(pts)]
+                  .find(([fx,fy,,,el])=>el.contains(document.elementFromPoint(fx,fy)));
                 if (!f) return null;
                 x=f[0]; y=f[1];
               }
@@ -380,7 +399,8 @@ def browser_operation(request):
                 e.dispatchEvent(new Event('change',{bubbles:true}));
               }
               return {x,y};
-            })(""" + json.dumps(action) + "," + json.dumps(JEV_VIEWPORT) + "," + json.dumps(JEV_HITTEST) + ")")
+            })(""" + json.dumps(action) + "," + json.dumps(JEV_VIEWPORT) + "," + json.dumps(JEV_HITTEST) + ","
+               + json.dumps(JEV_LABELS) + ")")
             if target is None:
                 if kind == "select":
                     raise RuntimeError("Dropdown execution was not confirmed; inspect before retrying.")

@@ -9,6 +9,27 @@
   const safe = e => !['password','file','hidden'].includes(e.type);
   const visible = e => !e.closest('[aria-hidden="true"],[inert]') &&
     e.checkVisibility({checkOpacity:true,checkVisibilityCSS:true});
+  // ---- estate patch (JEV_LABELS=1), 2026-09-23 ---------------------------------------
+  // A checkbox or radio styled as `opacity: 0` over or under its own visible <label> fails
+  // `visible` (checkOpacity), so stock never offers it: Wikipedia's Main menu, Tools and
+  // language toggles and its appearance radios, TodoMVC's "Mark all as complete" (measured
+  // by a click probe on 39 pages: 9 of the 12 real misses). Such an input is offered when a
+  // label of its own is rendered; the label names it already. `shown` replaces `visible`
+  // only where a control is offered or guarded. The LABEL need only be rendered, not
+  // exposed: Wikipedia marks its dropdown labels `aria-hidden` because the transparent input
+  // on top (`role="button"`, `aria-label`) is the accessible control. The INPUT keeps the
+  // aria-hidden/inert check. A label that is not rendered leaves the input unoffered, as does
+  // an input hidden by CSS visibility or display.
+  const __lb = "__JEV_LABELS_MODE__" === "1";
+  const labelledBy = e => __lb && e.tagName==='INPUT' && ['checkbox','radio'].includes(e.type) &&
+    !e.closest('[aria-hidden="true"],[inert]') && e.checkVisibility({checkVisibilityCSS:true}) ?
+    [...(e.labels||[])].filter(l=>l.checkVisibility({checkOpacity:true,checkVisibilityCSS:true})) : [];
+  const shown = e => visible(e) || labelledBy(e).length>0;
+  const hitAt = el => { const b=el.getBoundingClientRect();
+    return [b,...el.getClientRects()].some(q => { const fx=q.x+q.width/2, fy=q.y+q.height/2;
+      return q.width>0 && q.height>0 && fx>=0 && fy>=0 && fx<innerWidth && fy<innerHeight &&
+        el.contains(document.elementFromPoint(fx,fy)); }); };
+  // ---- end estate patch --------------------------------------------------------------
   const name = (e,seen=new Set()) => {
     if (!e || seen.has(e)) return '';
     seen.add(e);
@@ -45,7 +66,7 @@
     [...document.querySelectorAll('input,textarea,select')].filter(safe)
       .map(e=>[identity(e),e.value,e.checked,e.selectedIndex,e.disabled,e.readOnly])];
   cache.guard=e=>{
-    if (!e?.isConnected || !visible(e)) return null;
+    if (!e?.isConnected || !shown(e)) return null;  // estate patch (JEV_LABELS): shown
     const scope=e.closest('form,dialog,[role="dialog"],article,li,tr,[role="row"]') || e.parentElement;
     return [identity(e),role(e),name(e),e.value??null,e.checked??null,e.selectedIndex??null,
       e.readOnly??null,e.matches(':disabled'),e.getAttribute('aria-disabled'),
@@ -101,7 +122,7 @@
   // ---- end estate patch --------------------------------------------------------------
   const actions=[];
   for (const e of candidates) {
-    if (!safe(e) || !visible(e) || e.matches(':disabled') || e.closest('[aria-disabled="true"]')) continue;
+    if (!safe(e) || !shown(e) || e.matches(':disabled') || e.closest('[aria-disabled="true"]')) continue;
     const r=e.getBoundingClientRect(), x=r.x+r.width/2, y=r.y+r.height/2,
       rname=role(e) || (__listenedSet.has(e) ? 'button' : null);
     if (!rname || r.width<=0 || r.height<=0) continue;
@@ -146,7 +167,8 @@
     const __covered = !__offscreen && "__JEV_HITTEST_MODE__" === "1" && !e.contains(document.elementFromPoint(x,y)) &&
         ![...e.getClientRects()].some(q => { const fx=q.x+q.width/2, fy=q.y+q.height/2;
           return q.width>0 && q.height>0 && fx>=0 && fy>=0 && fx<innerWidth && fy<innerHeight &&
-            e.contains(document.elementFromPoint(fx,fy)); });
+            e.contains(document.elementFromPoint(fx,fy)); }) &&
+        !labelledBy(e).some(hitAt);  // estate patch (JEV_LABELS): a hittable label is a way in
     // ---- end estate patch --------------------------------------------------------------
     if (rname==='gridcell' && e.querySelector('button,[role="button"]')) continue;
     const base={node:identity(e),role:rname,label:name(e)||rname,offscreen:__offscreen,
